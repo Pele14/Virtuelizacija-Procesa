@@ -7,19 +7,23 @@ using System.Threading.Tasks;
 
 namespace Common
 {
-  
-    
-        [ServiceContract]
-        public interface IWeatherService
-        {
-            [OperationContract]
-            string StartSession(string meta);
 
-            [OperationContract]
-            string PushSample(WeatherSample sample);
 
-            [OperationContract]
-            string EndSession();
-        }
+    [ServiceContract]
+    public interface IWeatherService
+    {
+        [OperationContract]
+        [FaultContract(typeof(DataFormatFault))]
+        [FaultContract(typeof(ValidationFault))]
+        string StartSession(string meta);
+
+        [OperationContract]
+        [FaultContract(typeof(DataFormatFault))]
+        [FaultContract(typeof(ValidationFault))]
+        string PushSample(WeatherSample sample);
+
+        [OperationContract]
+        string EndSession();
     }
+}
 
