@@ -9,10 +9,33 @@ namespace Server
     [ServiceBehavior(InstanceContextMode = InstanceContextMode.Single)]
     public class WeatherService : IWeatherService, IDisposable
     {
+        // ====== EVENT-ovi (tačka 8) ======
+        public event EventHandler<TransferEventArgs> TransferStarted;
+        public event EventHandler<SampleEventArgs> SampleReceived;
+        public event EventHandler<TransferEventArgs> TransferCompleted;
+        public event EventHandler<WarningEventArgs> WarningRaised;
+
         private FileWriter sessionWriter;
         private FileWriter rejectsWriter;
         private bool sessionActive = false;
         private bool disposed = false;
+
+        private string sessionFilePath;
+        private string rejectsFilePath;
+        private string lastMeta;
+
+        // --- Helpers za sigurno podizanje event-ova
+        protected virtual void OnTransferStarted(string sessionFile, string meta)
+            => TransferStarted?.Invoke(this, new TransferEventArgs(sessionFile, meta, DateTime.UtcNow));
+
+        protected virtual void OnSampleReceived(WeatherSample sample)
+            => SampleReceived?.Invoke(this, new SampleEventArgs(sample, DateTime.UtcNow));
+
+        protected virtual void OnTransferCompleted(string sessionFile)
+            => TransferCompleted?.Invoke(this, new TransferEventArgs(sessionFile, lastMeta, DateTime.UtcNow));
+
+        protected virtual void OnWarningRaised(string code, string message, WeatherSample sample = null)
+            => WarningRaised?.Invoke(this, new WarningEventArgs(code, message, sample, DateTime.UtcNow));
 
         public string StartSession(string meta)
         {
@@ -27,16 +50,22 @@ namespace Server
             string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
             Directory.CreateDirectory(folder);
 
-            string sessionFile = Path.Combine(folder, $"measurements_session_{DateTime.Now:yyyyMMddHHmmss}.csv");
-            string rejectsFile = Path.Combine(folder, $"rejects_{DateTime.Now:yyyyMMddHHmmss}.csv");
+            sessionFilePath = Path.Combine(folder, $"measurements_session_{DateTime.Now:yyyyMMddHHmmss}.csv");
+            rejectsFilePath = Path.Combine(folder, $"rejects_{DateTime.Now:yyyyMMddHHmmss}.csv");
 
-            sessionWriter = new FileWriter(sessionFile);
+            sessionWriter = new FileWriter(sessionFilePath);
             sessionWriter.WriteLine("T,Pressure,Tpot,Tdew,VPmax,VPdef,VPact,Date");
 
-            rejectsWriter = new FileWriter(rejectsFile);
+            rejectsWriter = new FileWriter(rejectsFilePath);
             rejectsWriter.WriteLine("Line,Reason,RawData");
 
+            lastMeta = meta;
             sessionActive = true;
+
+            // Event
+            OnTransferStarted(sessionFilePath, meta);
+
+            // (po želji) i dalje možemo ispisati u konzolu direktno
             Console.WriteLine(">>> Nova sesija započeta. Prenos u toku...");
             return "ACK: Session started.";
         }
@@ -48,20 +77,27 @@ namespace Server
                     new ValidationFault { Message = "Nema aktivne sesije." });
 
             if (sample == null)
+            {
+                OnWarningRaised("SAMPLE_NULL", "Sample ne sme biti null.");
                 throw new FaultException<DataFormatFault>(
                     new DataFormatFault { Message = "Sample ne sme biti null." });
+            }
 
             if (sample.Pressure <= 0)
             {
-                rejectsWriter.WriteLine($"Pressure<=0,{DateTime.Now},{sample.Pressure}");
+                rejectsWriter.WriteLine($"Pressure<=0,{DateTime.Now},{sample?.Pressure}");
+                OnWarningRaised("PRESSURE_INVALID", "Pritisak mora biti pozitivan.", sample);
                 Console.WriteLine(">>> Odbačen sample (Pressure<=0)");
                 throw new FaultException<ValidationFault>(
                     new ValidationFault { Message = "Pritisak mora biti pozitivan." });
             }
 
             if (sample.Date == default)
+            {
+                OnWarningRaised("DATE_MISSING", "Datum je obavezan.", sample);
                 throw new FaultException<DataFormatFault>(
                     new DataFormatFault { Message = "Datum je obavezan." });
+            }
 
             try
             {
@@ -71,13 +107,17 @@ namespace Server
                     sample.VPmax, sample.VPdef, sample.VPact, sample.Date);
 
                 sessionWriter.WriteLine(line);
-                Console.WriteLine($">>> Sample primljen: Pressure={sample.Pressure}, Date={sample.Date}");
 
+                // Event
+                OnSampleReceived(sample);
+
+                Console.WriteLine($">>> Sample primljen: Pressure={sample.Pressure}, Date={sample.Date}");
                 return "ACK: Sample received.";
             }
             catch (Exception ex)
             {
                 rejectsWriter.WriteLine($"Exception,{DateTime.Now},{ex.Message}");
+                OnWarningRaised("WRITE_ERROR", $"Greška pri upisu: {ex.Message}", sample);
                 Console.WriteLine($">>> Greška: {ex.Message}");
                 throw new FaultException<DataFormatFault>(
                     new DataFormatFault { Message = $"Greška pri upisu: {ex.Message}" });
@@ -92,13 +132,17 @@ namespace Server
 
             sessionActive = false;
 
-            Dispose(); // oslobodi resurse
+            // Zatvori resurse
+            Dispose();
+
+            // Event
+            OnTransferCompleted(sessionFilePath);
 
             Console.WriteLine(">>> Prenos završen.");
             return "ACK: Session ended.";
         }
 
-        // IDisposable implementacija
+        // ====== IDisposable implementacija (tačka 4) ======
         public void Dispose()
         {
             Dispose(true);
@@ -113,6 +157,8 @@ namespace Server
                 {
                     sessionWriter?.Dispose();
                     rejectsWriter?.Dispose();
+                    sessionWriter = null;
+                    rejectsWriter = null;
                 }
                 disposed = true;
             }
