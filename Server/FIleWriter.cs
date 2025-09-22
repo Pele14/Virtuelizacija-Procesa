@@ -23,7 +23,7 @@ namespace Server
         public void WriteLine(string line)
         {
             if (disposed)
-                throw new ObjectDisposedException("SessionFileWriter");
+                throw new ObjectDisposedException("FileWriter");
 
             writer.WriteLine(line);
             writer.Flush();
