@@ -3,6 +3,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.ServiceModel;
+using System.Xml; // za XmlDocument
 
 namespace Server
 {
@@ -15,6 +16,10 @@ namespace Server
         public event EventHandler<TransferEventArgs> TransferCompleted;
         public event EventHandler<WarningEventArgs> WarningRaised;
 
+        // ====== NOVI EVENT-ovi (tačka 9) ======
+        public event EventHandler<PressureEventArgs> PressureSpike;
+        public event EventHandler<PressureEventArgs> OutOfBandWarning;
+
         private FileWriter sessionWriter;
         private FileWriter rejectsWriter;
         private bool sessionActive = false;
@@ -23,6 +28,38 @@ namespace Server
         private string sessionFilePath;
         private string rejectsFilePath;
         private string lastMeta;
+
+        // ====== Polja za analitiku pritiska (tačka 9) ======
+        private double? lastPressure = null;
+        private double runningSum = 0;
+        private int sampleCount = 0;
+        private readonly double pressureThreshold;
+
+        public WeatherService()
+        {
+            // Alternativno čitanje praga iz App.config bez ConfigurationManager
+            try
+            {
+                var configPath = AppDomain.CurrentDomain.SetupInformation.ConfigurationFile;
+                var doc = new XmlDocument();
+                doc.Load(configPath);
+
+                var node = doc.SelectSingleNode("//appSettings/add[@key='P_threshold']");
+                if (node?.Attributes?["value"] != null &&
+                    double.TryParse(node.Attributes["value"].Value, out double val))
+                {
+                    pressureThreshold = val;
+                }
+                else
+                {
+                    pressureThreshold = 5.0;
+                }
+            }
+            catch
+            {
+                pressureThreshold = 5.0; // fallback
+            }
+        }
 
         // --- Helpers za sigurno podizanje event-ova
         protected virtual void OnTransferStarted(string sessionFile, string meta)
@@ -36,6 +73,12 @@ namespace Server
 
         protected virtual void OnWarningRaised(string code, string message, WeatherSample sample = null)
             => WarningRaised?.Invoke(this, new WarningEventArgs(code, message, sample, DateTime.UtcNow));
+
+        protected virtual void OnPressureSpike(double currentPressure, double deltaP, double mean, string direction)
+            => PressureSpike?.Invoke(this, new PressureEventArgs(currentPressure, deltaP, mean, direction));
+
+        protected virtual void OnOutOfBandWarning(double currentPressure, double deltaP, double mean, string direction)
+            => OutOfBandWarning?.Invoke(this, new PressureEventArgs(currentPressure, deltaP, mean, direction));
 
         public string StartSession(string meta)
         {
@@ -62,10 +105,14 @@ namespace Server
             lastMeta = meta;
             sessionActive = true;
 
+            // Reset analitike
+            lastPressure = null;
+            runningSum = 0;
+            sampleCount = 0;
+
             // Event
             OnTransferStarted(sessionFilePath, meta);
 
-            // (po želji) i dalje možemo ispisati u konzolu direktno
             Console.WriteLine(">>> Nova sesija započeta. Prenos u toku...");
             return "ACK: Session started.";
         }
@@ -110,6 +157,32 @@ namespace Server
 
                 // Event
                 OnSampleReceived(sample);
+
+                // ====== Analitika ΔP i Pmean (tačka 9) ======
+                sampleCount++;
+                runningSum += sample.Pressure;
+                double mean = runningSum / sampleCount;
+
+                if (lastPressure.HasValue)
+                {
+                    double deltaP = sample.Pressure - lastPressure.Value;
+
+                    if (Math.Abs(deltaP) > pressureThreshold)
+                    {
+                        string direction = deltaP > 0 ? "iznad očekivanog" : "ispod očekivanog";
+                        OnPressureSpike(sample.Pressure, deltaP, mean, direction);
+                        Console.WriteLine($">>> PressureSpike! ΔP={deltaP}, P={sample.Pressure}, Mean={mean}");
+                    }
+
+                    if (sample.Pressure < 0.75 * mean || sample.Pressure > 1.25 * mean)
+                    {
+                        string direction = sample.Pressure > mean ? "iznad očekivane vrednosti" : "ispod očekivane vrednosti";
+                        OnOutOfBandWarning(sample.Pressure, deltaP, mean, direction);
+                        Console.WriteLine($">>> OutOfBandWarning! P={sample.Pressure}, Mean={mean}");
+                    }
+                }
+
+                lastPressure = sample.Pressure;
 
                 Console.WriteLine($">>> Sample primljen: Pressure={sample.Pressure}, Date={sample.Date}");
                 return "ACK: Sample received.";
