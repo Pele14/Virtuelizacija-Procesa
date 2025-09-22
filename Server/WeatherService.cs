@@ -16,9 +16,13 @@ namespace Server
         public event EventHandler<TransferEventArgs> TransferCompleted;
         public event EventHandler<WarningEventArgs> WarningRaised;
 
-        // ====== NOVI EVENT-ovi (tačka 9) ======
+        // ====== EVENT-ovi (tačka 9) ======
         public event EventHandler<PressureEventArgs> PressureSpike;
         public event EventHandler<PressureEventArgs> OutOfBandWarning;
+
+        // ====== EVENT-ovi (tačka 10) ======
+        public event EventHandler<VaporEventArgs> VPActSpike;
+        public event EventHandler<VaporEventArgs> VPDefSpike;
 
         private FileWriter sessionWriter;
         private FileWriter rejectsWriter;
@@ -35,33 +39,40 @@ namespace Server
         private int sampleCount = 0;
         private readonly double pressureThreshold;
 
+        // ====== Polja za analitiku VPact i VPdef (tačka 10) ======
+        private double? lastVPact = null;
+        private double? lastVPdef = null;
+        private readonly double vpactThreshold;
+        private readonly double vpdefThreshold;
+
         public WeatherService()
         {
-            // Alternativno čitanje praga iz App.config bez ConfigurationManager
+            // Ručno parsiranje appSettings iz App.config
+            pressureThreshold = ReadThresholdFromConfig("P_threshold", 5.0);
+            vpactThreshold = ReadThresholdFromConfig("VPact_threshold", 0.5);
+            vpdefThreshold = ReadThresholdFromConfig("VPdef_threshold", 0.5);
+        }
+
+        private double ReadThresholdFromConfig(string key, double defaultVal)
+        {
             try
             {
                 var configPath = AppDomain.CurrentDomain.SetupInformation.ConfigurationFile;
                 var doc = new XmlDocument();
                 doc.Load(configPath);
 
-                var node = doc.SelectSingleNode("//appSettings/add[@key='P_threshold']");
+                var node = doc.SelectSingleNode($"//appSettings/add[@key='{key}']");
                 if (node?.Attributes?["value"] != null &&
                     double.TryParse(node.Attributes["value"].Value, out double val))
                 {
-                    pressureThreshold = val;
-                }
-                else
-                {
-                    pressureThreshold = 5.0;
+                    return val;
                 }
             }
-            catch
-            {
-                pressureThreshold = 5.0; // fallback
-            }
+            catch { }
+            return defaultVal;
         }
 
-        // --- Helpers za sigurno podizanje event-ova
+        // --- Helpers za evente
         protected virtual void OnTransferStarted(string sessionFile, string meta)
             => TransferStarted?.Invoke(this, new TransferEventArgs(sessionFile, meta, DateTime.UtcNow));
 
@@ -79,6 +90,12 @@ namespace Server
 
         protected virtual void OnOutOfBandWarning(double currentPressure, double deltaP, double mean, string direction)
             => OutOfBandWarning?.Invoke(this, new PressureEventArgs(currentPressure, deltaP, mean, direction));
+
+        protected virtual void OnVPActSpike(double current, double delta)
+            => VPActSpike?.Invoke(this, new VaporEventArgs("VPact", current, delta, DateTime.UtcNow));
+
+        protected virtual void OnVPDefSpike(double current, double delta)
+            => VPDefSpike?.Invoke(this, new VaporEventArgs("VPdef", current, delta, DateTime.UtcNow));
 
         public string StartSession(string meta)
         {
@@ -109,8 +126,9 @@ namespace Server
             lastPressure = null;
             runningSum = 0;
             sampleCount = 0;
+            lastVPact = null;
+            lastVPdef = null;
 
-            // Event
             OnTransferStarted(sessionFilePath, meta);
 
             Console.WriteLine(">>> Nova sesija započeta. Prenos u toku...");
@@ -134,7 +152,6 @@ namespace Server
             {
                 rejectsWriter.WriteLine($"Pressure<=0,{DateTime.Now},{sample?.Pressure}");
                 OnWarningRaised("PRESSURE_INVALID", "Pritisak mora biti pozitivan.", sample);
-                Console.WriteLine(">>> Odbačen sample (Pressure<=0)");
                 throw new FaultException<ValidationFault>(
                     new ValidationFault { Message = "Pritisak mora biti pozitivan." });
             }
@@ -154,11 +171,9 @@ namespace Server
                     sample.VPmax, sample.VPdef, sample.VPact, sample.Date);
 
                 sessionWriter.WriteLine(line);
-
-                // Event
                 OnSampleReceived(sample);
 
-                // ====== Analitika ΔP i Pmean (tačka 9) ======
+                // ====== Tačka 9 – ΔP analitika ======
                 sampleCount++;
                 runningSum += sample.Pressure;
                 double mean = runningSum / sampleCount;
@@ -171,27 +186,39 @@ namespace Server
                     {
                         string direction = deltaP > 0 ? "iznad očekivanog" : "ispod očekivanog";
                         OnPressureSpike(sample.Pressure, deltaP, mean, direction);
-                        Console.WriteLine($">>> PressureSpike! ΔP={deltaP}, P={sample.Pressure}, Mean={mean}");
                     }
 
                     if (sample.Pressure < 0.75 * mean || sample.Pressure > 1.25 * mean)
                     {
                         string direction = sample.Pressure > mean ? "iznad očekivane vrednosti" : "ispod očekivane vrednosti";
                         OnOutOfBandWarning(sample.Pressure, deltaP, mean, direction);
-                        Console.WriteLine($">>> OutOfBandWarning! P={sample.Pressure}, Mean={mean}");
                     }
                 }
-
                 lastPressure = sample.Pressure;
 
-                Console.WriteLine($">>> Sample primljen: Pressure={sample.Pressure}, Date={sample.Date}");
+                // ====== Tačka 10 – ΔVPact i ΔVPdef ======
+                if (lastVPact.HasValue)
+                {
+                    double deltaVPact = sample.VPact - lastVPact.Value;
+                    if (Math.Abs(deltaVPact) > vpactThreshold)
+                        OnVPActSpike(sample.VPact, deltaVPact);
+                }
+                lastVPact = sample.VPact;
+
+                if (lastVPdef.HasValue)
+                {
+                    double deltaVPdef = sample.VPdef - lastVPdef.Value;
+                    if (Math.Abs(deltaVPdef) > vpdefThreshold)
+                        OnVPDefSpike(sample.VPdef, deltaVPdef);
+                }
+                lastVPdef = sample.VPdef;
+
                 return "ACK: Sample received.";
             }
             catch (Exception ex)
             {
                 rejectsWriter.WriteLine($"Exception,{DateTime.Now},{ex.Message}");
                 OnWarningRaised("WRITE_ERROR", $"Greška pri upisu: {ex.Message}", sample);
-                Console.WriteLine($">>> Greška: {ex.Message}");
                 throw new FaultException<DataFormatFault>(
                     new DataFormatFault { Message = $"Greška pri upisu: {ex.Message}" });
             }
@@ -204,18 +231,14 @@ namespace Server
                     new ValidationFault { Message = "Nema aktivne sesije za završavanje." });
 
             sessionActive = false;
-
-            // Zatvori resurse
             Dispose();
-
-            // Event
             OnTransferCompleted(sessionFilePath);
 
             Console.WriteLine(">>> Prenos završen.");
             return "ACK: Session ended.";
         }
 
-        // ====== IDisposable implementacija (tačka 4) ======
+        // IDisposable
         public void Dispose()
         {
             Dispose(true);
