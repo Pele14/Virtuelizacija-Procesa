@@ -1,33 +1,43 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using Common;
+using System;
+using Client;
+using System.ServiceModel;
+using System.IO;
 
-namespace Client
+namespace ClientApp
 {
-    internal class Program
+    class Program
     {
         static void Main(string[] args)
         {
-            string datasetPath = @"C:\Datasets\weather.csv"; // ovde stavi tačnu putanju
+            ChannelFactory<IWeatherService> factory =
+                new ChannelFactory<IWeatherService>("WeatherServiceEndpoint");
+            var proxy = factory.CreateChannel();
 
-            try
-            {
-                var samples = CsvReader.LoadSamples(datasetPath);
+            Console.WriteLine(">>> Pokrećem sesiju...");
+            string meta = "T,Pressure,Tpot,Tdew,VPmax,VPdef,VPact,Date";
+            Console.WriteLine(proxy.StartSession(meta));
 
-                Console.WriteLine($"Učitano {samples.Count} validnih redova.");
-                Console.WriteLine("Prvi uzorak:");
-                if (samples.Count > 0)
-                {
-                    var s = samples[0];
-                    Console.WriteLine($"T={s.T}, Pressure={s.Pressure}, Date={s.Date}");
-                }
-            }
-            catch (Exception ex)
+            string datasetPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                @"..\..\Data\cleaned_weather.csv"
+            );
+            datasetPath = Path.GetFullPath(datasetPath);
+
+            Console.WriteLine($">>> Pokušavam da učitam CSV sa putanje: {datasetPath}");
+
+            var samples = CsvReader.LoadSamples(datasetPath);
+            Console.WriteLine($">>> Učitano {samples.Count} uzoraka iz CSV fajla.");
+
+            foreach (var sample in samples)
             {
-                Console.WriteLine($"Greška: {ex.Message}");
+                string response = proxy.PushSample(sample);
+                Console.WriteLine(response);
+                System.Threading.Thread.Sleep(200); // simulacija realnog prenosa
             }
+
+            Console.WriteLine(proxy.EndSession());
+            Console.WriteLine(">>> Kraj programa.");
         }
     }
 }

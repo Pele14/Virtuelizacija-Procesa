@@ -27,6 +27,10 @@ namespace Client
                     var line = sr.ReadLine();
                     lineNumber++;
 
+                    // preskoči header red (kolone)
+                    if (line.StartsWith("date", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     if (string.IsNullOrWhiteSpace(line))
                         continue;
 
@@ -41,14 +45,15 @@ namespace Client
                     {
                         var sample = new WeatherSample
                         {
-                            T = double.Parse(parts[0], CultureInfo.InvariantCulture),
+                            // pazimo na redosled: date,p,T,Tpot,Tdew,VPmax,VPact,VPdef
+                            Date = DateTime.ParseExact(parts[0], "M/d/yyyy H:mm", CultureInfo.InvariantCulture),
                             Pressure = double.Parse(parts[1], CultureInfo.InvariantCulture),
-                            Tpot = double.Parse(parts[2], CultureInfo.InvariantCulture),
-                            Tdew = double.Parse(parts[3], CultureInfo.InvariantCulture),
-                            VPmax = double.Parse(parts[4], CultureInfo.InvariantCulture),
-                            VPdef = double.Parse(parts[5], CultureInfo.InvariantCulture),
+                            T = double.Parse(parts[2], CultureInfo.InvariantCulture),
+                            Tpot = double.Parse(parts[3], CultureInfo.InvariantCulture),
+                            Tdew = double.Parse(parts[4], CultureInfo.InvariantCulture),
+                            VPmax = double.Parse(parts[5], CultureInfo.InvariantCulture),
                             VPact = double.Parse(parts[6], CultureInfo.InvariantCulture),
-                            Date = DateTime.Parse(parts[7], CultureInfo.InvariantCulture)
+                            VPdef = double.Parse(parts[7], CultureInfo.InvariantCulture)
                         };
 
                         samples.Add(sample);

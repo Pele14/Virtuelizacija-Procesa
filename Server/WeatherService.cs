@@ -1,11 +1,12 @@
 ﻿using Common;
 using System;
+using System.Globalization;
 using System.IO;
 using System.ServiceModel;
-using System.Globalization;
 
 namespace Server
 {
+    [ServiceBehavior(InstanceContextMode = InstanceContextMode.Single)]
     public class WeatherService : IWeatherService
     {
         private string sessionFile;
@@ -20,7 +21,6 @@ namespace Server
             string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
             Directory.CreateDirectory(folder);
 
-            // kreiraj fajlove za sesiju
             sessionFile = Path.Combine(folder, $"measurements_session_{DateTime.Now:yyyyMMddHHmmss}.csv");
             rejectsFile = Path.Combine(folder, $"rejects_{DateTime.Now:yyyyMMddHHmmss}.csv");
 
@@ -28,6 +28,7 @@ namespace Server
             File.WriteAllText(rejectsFile, "Line,Reason,RawData\n");
 
             sessionActive = true;
+            Console.WriteLine(">>> Nova sesija započeta. Prenos u toku...");
             return "ACK: Session started.";
         }
 
@@ -38,10 +39,10 @@ namespace Server
 
             try
             {
-                // validacija pritiska
                 if (sample.Pressure <= 0)
                 {
                     File.AppendAllText(rejectsFile, $"Pressure<=0,{DateTime.Now},{sample.Pressure}\n");
+                    Console.WriteLine(">>> Odbačen sample (Pressure<=0)");
                     return "NACK: Invalid pressure.";
                 }
 
@@ -52,11 +53,13 @@ namespace Server
 
                 File.AppendAllText(sessionFile, line + Environment.NewLine);
 
+                Console.WriteLine($">>> Sample primljen: Pressure={sample.Pressure}, Date={sample.Date}");
                 return "ACK: Sample received.";
             }
             catch (Exception ex)
             {
                 File.AppendAllText(rejectsFile, $"Exception,{DateTime.Now},{ex.Message}\n");
+                Console.WriteLine($">>> Greška: {ex.Message}");
                 return $"NACK: {ex.Message}";
             }
         }
@@ -67,6 +70,7 @@ namespace Server
                 return "NACK: No active session.";
 
             sessionActive = false;
+            Console.WriteLine(">>> Prenos završen.");
             return "ACK: Session ended.";
         }
     }
